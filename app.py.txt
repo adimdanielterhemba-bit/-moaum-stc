@@ -1,0 +1,331 @@
+import sqlite3, random, string, os
+from flask import Flask, request, redirect, session, render_template_string, g, send_file
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime
+import pandas as pd
+
+app = Flask(__name__)
+app.secret_key = 'moaum-stc-permanent-final-2026'
+DATABASE = 'moaum_stc.db'
+
+SUPER_ADMIN_USERNAME = "superadmin"
+SUPER_ADMIN_PASSWORD = "MoaumSTC@Super2026"
+
+def get_db():
+    db = getattr(g, '_database', None)
+    if db is None:
+        db = g._database = sqlite3.connect(DATABASE)
+        db.row_factory = sqlite3.Row
+    return db
+
+def gen_pin():
+    return ''.join(random.choices(string.digits, k=4)) + '-' + ''.join(random.choices(string.digits, k=4)) + '-' + ''.join(random.choices(string.digits, k=4)) + '-' + ''.join(random.choices(string.digits, k=4))
+
+def grade_calc(total):
+    if total >= 75: return "A1", "Excellent"
+    if total >= 70: return "B2", "Very Good"
+    if total >= 65: return "B3", "Good"
+    if total >= 60: return "C4", "Credit"
+    if total >= 55: return "C5", "Credit"
+    if total >= 50: return "C6", "Credit"
+    if total >= 45: return "D7", "Pass"
+    if total >= 40: return "E8", "Pass"
+    return "F9", "Fail"
+
+def init_db():
+    with app.app_context():
+        db = get_db()
+        db.execute('''CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, full_name TEXT NOT NULL, password_hash TEXT NOT NULL, password_plain TEXT NOT NULL, role TEXT NOT NULL, class_name TEXT)''')
+        db.execute('''CREATE TABLE IF NOT EXISTS classes (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE)''')
+        db.execute('''CREATE TABLE IF NOT EXISTS subjects (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT)''')
+        db.execute('''CREATE TABLE IF NOT EXISTS results (id INTEGER PRIMARY KEY AUTOINCREMENT, student_id INTEGER, subject TEXT, ca1 INTEGER, ca2 INTEGER, ca3 INTEGER, exam INTEGER, total INTEGER, grade TEXT, term TEXT, session TEXT, class_name TEXT, attendance_present INTEGER, attendance_total INTEGER, teacher_comment TEXT, principal_comment TEXT, trade_comment TEXT)''')
+        db.execute('''CREATE TABLE IF NOT EXISTS scratch_pins (id INTEGER PRIMARY KEY AUTOINCREMENT, pin TEXT UNIQUE, session TEXT, term TEXT, is_used INTEGER DEFAULT 0, used_by INTEGER, class_name TEXT, date_generated TEXT)''')
+        db.execute('''CREATE TABLE IF NOT EXISTS comments_template (id INTEGER PRIMARY KEY AUTOINCREMENT, category TEXT, comment TEXT)''')
+        db.execute('''CREATE TABLE IF NOT EXISTS newsletter (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, content TEXT, date_posted TEXT, target TEXT)''')
+        db.execute('''CREATE TABLE IF NOT EXISTS assignments (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, subject TEXT, class_name TEXT, content TEXT, posted_by TEXT, date_posted TEXT)''')
+        cur = db.execute("SELECT * FROM users WHERE username=?", (SUPER_ADMIN_USERNAME,)).fetchone()
+        if not cur:
+            db.execute("INSERT INTO users (username, full_name, password_hash, password_plain, role) VALUES (?,?,?,?,?)", (SUPER_ADMIN_USERNAME, "Super Admin - MOAUM STC", generate_password_hash(SUPER_ADMIN_PASSWORD), SUPER_ADMIN_PASSWORD, "superadmin"))
+        for c in ["JSS1","JSS2","JSS3","SS1","SS2","SS3","JSS1A","JSS1B"]:
+            try: db.execute("INSERT INTO classes (name) VALUES (?)",(c,));
+            except: pass
+        for s in ["Mathematics","English Language","Physics","Chemistry","Biology","Economics","Geography","Civic Education","Computer Science","Further Maths","Agric Science","Commerce","Financial Accounting","Government","Literature"]:
+            try: db.execute("INSERT INTO subjects (name) VALUES (?)",(s,));
+            except: pass
+        if not db.execute("SELECT * FROM comments_template").fetchone():
+            for cat, com in [("teacher","An excellent student with great potential. Keep it up!"),("teacher","Good performance but needs more effort."),("teacher","Average performance. Needs to be more serious."),("principal","Promoted to next class. Congratulations!"),("principal","Excellent result. Promoted."),("trade","Shows good moral behavior and neatness."),("trade","Respectful and obedient. Good character.")]:
+                db.execute("INSERT INTO comments_template (category, comment) VALUES (?,?)",(cat, com))
+        db.commit()
+
+@app.teardown_appcontext
+def close_connection(e):
+    db = getattr(g, '_database', None)
+    if db: db.close()
+
+HOME_HTML = """
+<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<style>body{font-family:Segoe UI}.navbar{background:#0a1931!important}.hero{background:linear-gradient(rgba(10,25,49,0.92),rgba(10,25,49,0.88)),url('https://images.unsplash.com/photo-1588072432836-e10032774350?w=1200');background-size:cover;color:white;padding:100px 0}.btn-gold{background:#ffc947;color:#0a1931;font-weight:bold}.section-title{border-left:6px solid #ffc947;padding-left:12px;color:#0a1931;font-weight:800}</style></head><body>
+<nav class="navbar navbar-dark sticky-top"><div class="container"><a class="navbar-brand fw-bold" href="/">MOAUM STC</a><a href="/login" class="btn btn-gold btn-sm px-4">ONE LOGIN PORTAL</a></div></div></nav>
+<div class="hero text-center"><div class="container"><h1 class="display-6 fw-bold">MOAUM STC - Moaum Science & Technical College</h1><p>One Login for Super Admin, Admin, Teacher, Student | PIN Secured | CA 10+10+10+70 | Offline + Online | All Editable</p><a href="/login" class="btn btn-gold btn-lg px-5">ENTER PORTAL - moaum-stc.onrender.com/login</a></div></div>
+<div class="container my-5"><h3 class="section-title">Newsletter / Broadcast</h3><div class="row mt-3">{% for n in newsletter %}<div class="col-md-6 mb-3"><div class="card shadow-sm border-start border-warning border-4"><div class="card-body"><h6 class="fw-bold">{{n['title']}} <span class="badge bg-dark">{{n['target']}}</span></h6><small class="text-muted">{{n['date_posted']}}</small><p class="mt-2">{{n['content']}}</p></div></div></div>{% endfor %}</div></div>
+<footer class="bg-dark text-white text-center py-3"><small>© 2026 MOAUM STC | Permanent: moaum-stc.onrender.com | Super Admin: superadmin / MoaumSTC@Super2026</small></footer></body></html>
+"""
+
+@app.route('/')
+def home():
+    db=get_db(); newsletter=db.execute("SELECT * FROM newsletter ORDER BY id DESC LIMIT 10").fetchall()
+    return render_template_string(HOME_HTML, newsletter=newsletter)
+
+@app.route('/login', methods=['GET','POST'])
+def login():
+    msg=""
+    if request.method=='POST':
+        u=request.form['username']; p=request.form['password']
+        db=get_db(); user=db.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone()
+        if user and check_password_hash(user['password_hash'], p):
+            session['user_id']=user['id']; session['role']=user['role']; session['username']=user['username']; session['class_name']=user['class_name']; session['full_name']=user['full_name']
+            if user['role']=='superadmin': return redirect('/superadmin')
+            elif user['role']=='admin': return redirect('/admin')
+            elif user['role']=='teacher': return redirect('/teacher')
+            else: return redirect('/student')
+        else: msg="Invalid login!"
+    return render_template_string("""<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><style>body{background:#0a1931;display:flex;justify-content:center;align-items:center;min-height:100vh}.card{max-width:430px;width:100%;border-top:5px solid #ffc947}</style><div class="card shadow p-4"><h4 class="text-center fw-bold">MOAUM STC LOGIN</h4><p class="text-center small">ONE LOGIN - Super Admin | Admin | Teacher | Student<br>Permanent: moaum-stc.onrender.com/login</p><hr><form method="post"><input name="username" class="form-control mb-2" placeholder="Username / RegNo" required><input type="password" name="password" class="form-control mb-3" placeholder="Password" required><button class="btn w-100" style="background:#0a1931;color:white">LOGIN</button></form><p class="text-danger text-center small mt-2">{{msg}}</p><a href="/" class="small">Homepage</a><hr><small>Super Admin: superadmin / MoaumSTC@Super2026</small></div>""", msg=msg)
+
+@app.route('/superadmin')
+def superadmin():
+    if session.get('role')!='superadmin': return redirect('/login')
+    db=get_db(); users=db.execute("SELECT * FROM users ORDER BY role, class_name").fetchall(); pins=db.execute("SELECT * FROM scratch_pins ORDER BY id DESC LIMIT 100").fetchall(); templates=db.execute("SELECT * FROM comments_template").fetchall(); classes=db.execute("SELECT * FROM classes").fetchall(); subjects=db.execute("SELECT * FROM subjects").fetchall()
+    return render_template_string("""
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<nav class="navbar navbar-dark bg-dark"><div class="container"><span class="navbar-brand">SUPER ADMIN - MOAUM STC - FULL EDITABLE - OFFLINE+ONLINE</span><div><a href="/superadmin/export" class="btn btn-success btn-sm">Export Backup (Offline)</a> <a href="/enter_result" class="btn btn-warning btn-sm">Enter Result</a> <a href="/logout" class="btn btn-light btn-sm">Logout</a></div></div></nav>
+<div class="container-fluid my-3">
+<div class="row g-2">
+<div class="col-md-7"><div class="card p-2"><h6>Create Enrollment - Teacher / Student / Admin (Main Enrollment)</h6><form method="post" action="/superadmin/create_user" class="row g-1"><div class="col-md-3"><input name="full_name" class="form-control form-control-sm" placeholder="Full Name" required></div><div class="col-md-2"><input name="username" class="form-control form-control-sm" placeholder="Username/RegNo" required></div><div class="col-md-2"><input name="password" class="form-control form-control-sm" placeholder="Password" required></div><div class="col-md-2"><select name="role" class="form-select form-select-sm"><option value="admin">Admin</option><option value="teacher">Teacher</option><option value="student">Student</option></select></div><div class="col-md-2"><input name="class_name" class="form-control form-control-sm" placeholder="Class" required></div><div class="col-md-1"><button class="btn btn-dark btn-sm w-100">Create</button></div></form></div></div>
+<div class="col-md-5"><div class="card p-2"><h6>Generate Scratch PINs - For Students Result Checking</h6><form method="post" action="/superadmin/gen_pins" class="row g-1"><div class="col-md-2"><input name="qty" type="number" class="form-control form-control-sm" value="20" required></div><div class="col-md-3"><select name="term" class="form-select form-select-sm"><option>1st Term</option><option>2nd Term</option><option>3rd Term</option></select></div><div class="col-md-3"><input name="session" class="form-control form-control-sm" value="2025/2026"></div><div class="col-md-3"><input name="class_name" class="form-control form-control-sm" placeholder="Class"></div><div class="col-md-1"><button class="btn btn-warning btn-sm w-100">Gen</button></div></form></div></div>
+</div>
+<div class="card mt-3 p-2"><h6>ALL ENROLLMENTS - Yellow = Password Visible - EDITABLE (Edit/Delete Anytime)</h6><div class="table-responsive"><table class="table table-bordered table-sm small"><tr class="table-dark"><th>ID</th><th>Username/RegNo</th><th>Full Name</th><th>Role</th><th>Class</th><th style="background:yellow;color:black;">Password Plain (Visible)</th><th>Action - Editable</th></tr>{% for u in users %}<tr><td>{{u['id']}}</td><td>{{u['username']}}</td><td>{{u['full_name']}}</td><td><span class="badge bg-dark">{{u['role']}}</span></td><td>{{u['class_name']}}</td><td style="background:yellow;font-weight:bold;">{{u['password_plain']}}</td><td><a href="/superadmin/edit_user/{{u['id']}}" class="btn btn-primary btn-sm">Edit</a> <a href="/superadmin/reset/{{u['id']}}" class="btn btn-warning btn-sm">Pass</a> <a href="/superadmin/delete/{{u['id']}}" class="btn btn-danger btn-sm">Del</a></td></tr>{% endfor %}</table></div></div>
+<div class="row mt-3 g-2"><div class="col-md-4"><div class="card p-2"><h6>Classes - Editable</h6><form method="post" action="/superadmin/add_class" class="d-flex mb-2"><input name="name" class="form-control form-control-sm" placeholder="e.g JSS1A" required><button class="btn btn-dark btn-sm ms-1">Add Class</button></form>{% for c in classes %}<span class="badge bg-secondary m-1">{{c['name']}} <a href="/superadmin/edit_class/{{c['id']}}" class="text-white text-decoration-underline">Edit</a> <a href="/superadmin/del_class/{{c['id']}}" class="text-white">x</a></span>{% endfor %}</div></div><div class="col-md-4"><div class="card p-2"><h6>Subjects - Editable</h6><form method="post" action="/superadmin/add_subject" class="d-flex mb-2"><input name="name" class="form-control form-control-sm" placeholder="Subject" required><button class="btn btn-dark btn-sm ms-1">Add Subject</button></form>{% for s in subjects %}<span class="badge bg-info m-1 text-dark">{{s['name']}} <a href="/superadmin/edit_subject/{{s['id']}}">Edit</a> <a href="/superadmin/del_subject/{{s['id']}}">x</a></span>{% endfor %}</div></div><div class="col-md-4"><div class="card p-2"><h6>Broadcast Newsletter to Parents/Students</h6><form method="post" action="/superadmin/add_newsletter" class="row g-1"><div class="col-4"><input name="title" class="form-control form-control-sm" placeholder="Title" required></div><div class="col-3"><select name="target" class="form-select form-select-sm"><option>All</option><option>Parents</option><option>Students</option></select></div><div class="col-3"><input name="content" class="form-control form-control-sm" placeholder="Message" required></div><div class="col-2"><button class="btn btn-primary btn-sm w-100">Post</button></div></form><hr><form method="post" action="/superadmin/upload_excel" enctype="multipart/form-data" class="d-flex"><input type="file" name="file" class="form-control form-control-sm" required><button class="btn btn-dark btn-sm ms-1">Bulk Upload Excel</button></form></div></div></div>
+<div class="row mt-3 g-2"><div class="col-md-6"><div class="card p-2"><h6>Scratch PINs - Give to Students (Copy Yellow)</h6><div style="max-height:250px; overflow:auto;"><table class="table table-sm small"><tr><th>PIN</th><th>Term</th><th>Session</th><th>Used?</th></tr>{% for p in pins %}<tr><td style="background:#e8f5e9; font-weight:bold;">{{p['pin']}}</td><td>{{p['term']}}</td><td>{{p['session']}}</td><td>{{'YES' if p['is_used'] else 'NO Fresh'}}</td></tr>{% endfor %}</table></div></div></div><div class="col-md-6"><div class="card p-2"><h6>Comment Templates - Editable Master</h6><form method="post" action="/superadmin/add_comment_template" class="row g-1 mb-2"><div class="col-3"><select name="category" class="form-select form-select-sm"><option value="teacher">Teacher</option><option value="principal">Principal</option><option value="trade">Trade</option></select></div><div class="col-7"><input name="comment" class="form-control form-control-sm" placeholder="Template comment" required></div><div class="col-2"><button class="btn btn-dark btn-sm w-100">Add</button></div></form><table class="table table-sm small"><tr><th>Cat</th><th>Comment</th><th>Edit</th></tr>{% for t in templates %}<tr><td><span class="badge bg-dark">{{t['category']}}</span></td><td>{{t['comment']}}</td><td><a href="/superadmin/edit_template/{{t['id']}}" class="btn btn-primary btn-sm">Edit</a> <a href="/superadmin/del_template/{{t['id']}}" class="btn btn-danger btn-sm">x</a></td></tr>{% endfor %}</table></div></div></div>
+</div>""", users=users, pins=pins, templates=templates, classes=classes, subjects=subjects)
+
+@app.route('/superadmin/create_user', methods=['POST'])
+def s_create():
+    if session.get('role')!='superadmin': return redirect('/login')
+    db=get_db()
+    try: db.execute("INSERT INTO users (username, full_name, password_hash, password_plain, role, class_name) VALUES (?,?,?,?,?,?)",(request.form['username'],request.form['full_name'],generate_password_hash(request.form['password']),request.form['password'],request.form['role'],request.form['class_name'])); db.commit()
+    except: pass
+    return redirect('/superadmin')
+
+@app.route('/superadmin/edit_user/<int:id>', methods=['GET','POST'])
+def edit_user(id):
+    db=get_db(); user=db.execute("SELECT * FROM users WHERE id=?",(id,)).fetchone()
+    if request.method=='POST':
+        db.execute("UPDATE users SET username=?, full_name=?, password_plain=?, password_hash=?, role=?, class_name=? WHERE id=?", (request.form['username'], request.form['full_name'], request.form['password'], generate_password_hash(request.form['password']), request.form['role'], request.form['class_name'], id)); db.commit(); return redirect('/superadmin')
+    return f'<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><div class="container my-5" style="max-width:500px;"><div class="card p-4"><h5>Edit Enrollment - {user["full_name"]}</h5><form method="post"><label>Full Name</label><input name="full_name" value="{user["full_name"]}" class="form-control mb-2" required><label>Username/RegNo</label><input name="username" value="{user["username"]}" class="form-control mb-2" required><label>Password Visible</label><input name="password" value="{user["password_plain"]}" class="form-control mb-2" required><label>Role</label><select name="role" class="form-select mb-2"><option {"selected" if user["role"]=="admin" else ""} value="admin">Admin</option><option {"selected" if user["role"]=="teacher" else ""} value="teacher">Teacher</option><option {"selected" if user["role"]=="student" else ""} value="student">Student</option></select><label>Class</label><input name="class_name" value="{user["class_name"]}" class="form-control mb-2"><button class="btn btn-warning w-100">Update Enrollment</button></form><a href="/superadmin" class="btn btn-dark w-100 mt-2">Back</a></div></div>'
+
+@app.route('/superadmin/gen_pins', methods=['POST'])
+def s_gen_pins():
+    if session.get('role')!='superadmin': return redirect('/login')
+    db=get_db(); qty=int(request.form['qty']); term=request.form['term']; sess=request.form['session']; class_name=request.form['class_name']
+    for _ in range(qty):
+        try: db.execute("INSERT INTO scratch_pins (pin, term, session, class_name, date_generated) VALUES (?,?,?,?,?)",(gen_pin(), term, sess, class_name, datetime.now().strftime("%Y-%m-%d %H:%M")))
+        except: pass
+    db.commit(); return redirect('/superadmin')
+
+@app.route('/superadmin/add_newsletter', methods=['POST'])
+def s_add_newsletter():
+    if session.get('role')!='superadmin': return redirect('/login')
+    db=get_db(); db.execute("INSERT INTO newsletter (title, content, date_posted, target) VALUES (?,?,?,?)",(request.form['title'],request.form['content'],datetime.now().strftime("%Y-%m-%d"),request.form['target'])); db.commit(); return redirect('/superadmin')
+
+@app.route('/superadmin/add_class', methods=['POST'])
+def s_add_class():
+    if session.get('role')!='superadmin': return redirect('/login')
+    db=get_db()
+    try: db.execute("INSERT INTO classes (name) VALUES (?)",(request.form['name'],)); db.commit()
+    except: pass
+    return redirect('/superadmin')
+
+@app.route('/superadmin/edit_class/<int:id>', methods=['GET','POST'])
+def edit_class(id):
+    db=get_db(); c=db.execute("SELECT * FROM classes WHERE id=?",(id,)).fetchone()
+    if request.method=='POST': db.execute("UPDATE classes SET name=? WHERE id=?",(request.form['name'], id)); db.commit(); return redirect('/superadmin')
+    return f'<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><div class="container my-5" style="max-width:400px;"><div class="card p-4"><h4>Edit Class - {c["name"]}</h4><form method="post"><input name="name" value="{c["name"]}" class="form-control mb-2" required><button class="btn btn-dark w-100">Update Class</button></form><a href="/superadmin" class="btn btn-secondary w-100 mt-2">Back</a></div></div>'
+
+@app.route('/superadmin/del_class/<int:id>')
+def s_del_class(id): db=get_db(); db.execute("DELETE FROM classes WHERE id=?",(id,)); db.commit(); return redirect('/superadmin')
+@app.route('/superadmin/add_subject', methods=['POST'])
+def s_add_sub(): db=get_db(); db.execute("INSERT INTO subjects (name) VALUES (?)",(request.form['name'],)); db.commit(); return redirect('/superadmin')
+@app.route('/superadmin/edit_subject/<int:id>', methods=['GET','POST'])
+def edit_subject(id):
+    db=get_db(); s=db.execute("SELECT * FROM subjects WHERE id=?",(id,)).fetchone()
+    if request.method=='POST': db.execute("UPDATE subjects SET name=? WHERE id=?",(request.form['name'], id)); db.commit(); return redirect('/superadmin')
+    return f'<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><div class="container my-5" style="max-width:400px;"><div class="card p-4"><h4>Edit Subject - {s["name"]}</h4><form method="post"><input name="name" value="{s["name"]}" class="form-control mb-2" required><button class="btn btn-dark w-100">Update Subject</button></form><a href="/superadmin" class="btn btn-secondary w-100 mt-2">Back</a></div></div>'
+@app.route('/superadmin/del_subject/<int:id>')
+def s_del_sub(id): db=get_db(); db.execute("DELETE FROM subjects WHERE id=?",(id,)); db.commit(); return redirect('/superadmin')
+@app.route('/superadmin/add_comment_template', methods=['POST'])
+def s_add_template(): db=get_db(); db.execute("INSERT INTO comments_template (category, comment) VALUES (?,?)",(request.form['category'], request.form['comment'])); db.commit(); return redirect('/superadmin')
+@app.route('/superadmin/edit_template/<int:id>', methods=['GET','POST'])
+def edit_template(id):
+    db=get_db(); t=db.execute("SELECT * FROM comments_template WHERE id=?",(id,)).fetchone()
+    if request.method=='POST': db.execute("UPDATE comments_template SET category=?, comment=? WHERE id=?",(request.form['category'], request.form['comment'], id)); db.commit(); return redirect('/superadmin')
+    return f'<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><div class="container my-5" style="max-width:500px;"><div class="card p-4"><h4>Edit Comment Template</h4><form method="post"><select name="category" class="form-select mb-2"><option {"selected" if t["category"]=="teacher" else ""} value="teacher">Teacher</option><option {"selected" if t["category"]=="principal" else ""} value="principal">Principal</option><option {"selected" if t["category"]=="trade" else ""} value="trade">Trade</option></select><textarea name="comment" class="form-control mb-2" required>{t["comment"]}</textarea><button class="btn btn-dark w-100">Update Template</button></form><a href="/superadmin" class="btn btn-secondary w-100 mt-2">Back</a></div></div>'
+@app.route('/superadmin/del_template/<int:id>')
+def s_del_template(id): db=get_db(); db.execute("DELETE FROM comments_template WHERE id=?",(id,)); db.commit(); return redirect('/superadmin')
+@app.route('/superadmin/delete/<int:id>')
+def s_del(id): db=get_db(); db.execute("DELETE FROM users WHERE id=?",(id,)); db.commit(); return redirect('/superadmin')
+@app.route('/superadmin/reset/<int:id>', methods=['GET','POST'])
+def s_reset(id):
+    if session.get('role')!='superadmin': return redirect('/login')
+    if request.method=='POST': db=get_db(); db.execute("UPDATE users SET password_hash=?, password_plain=? WHERE id=?",(generate_password_hash(request.form['password']),request.form['password'],id)); db.commit(); return redirect('/superadmin')
+    return f'<div style="padding:20px;"><h3>Change Password ID {id}</h3><form method="post"><input name="password" placeholder="New Password" required><button>Update</button></form></div>'
+@app.route('/superadmin/upload_excel', methods=['POST'])
+def s_upload():
+    if session.get('role')!='superadmin': return redirect('/login')
+    f=request.files['file']
+    if f:
+        df=pd.read_excel(f); db=get_db()
+        for _,r in df.iterrows():
+            try: db.execute("INSERT INTO users (username, full_name, password_hash, password_plain, role, class_name) VALUES (?,?,?,?,?,?)",(str(r['username']),str(r['full_name']),generate_password_hash(str(r['password'])),str(r['password']),str(r['role']),str(r.get('class_name',''))))
+            except: pass
+        db.commit()
+    return redirect('/superadmin')
+
+# EXPORT FOR OFFLINE + ONLINE
+@app.route('/superadmin/export')
+def export_data():
+    if session.get('role')!='superadmin': return redirect('/login')
+    db=get_db()
+    try:
+        results = db.execute("SELECT u.username, u.full_name, u.class_name, r.subject, r.ca1, r.ca2, r.ca3, r.exam, r.total, r.grade, r.term, r.session, r.attendance_present, r.attendance_total, r.teacher_comment, r.principal_comment FROM results r JOIN users u ON r.student_id=u.id").fetchall()
+        df = pd.DataFrame([dict(r) for r in results])
+        df.to_excel("moaum_stc_results_export.xlsx", index=False)
+    except Exception as e: print(e)
+    return render_template_string("""
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<div class="container my-5" style="max-width:700px;"><div class="card p-4"><h4>MOAUM STC - Offline + Online Backup</h4>
+<p><b>OFFLINE MODE:</b> Your data is in file <code>moaum_stc.db</code> in your folder. You can work offline without internet by running <code>py app.py</code></p>
+<p><b>TO GO ONLINE:</b> When you have internet:</p>
+<ol><li>Click Download Excel below</li><li>Go to <b>moaum-stc.onrender.com/superadmin</b></li><li>Use Bulk Upload Excel to publish online</li><li>Generate PINs and give to students</li></ol>
+<a href="/download_excel" class="btn btn-success w-100 mb-2">Download Results Excel (For Online Upload)</a>
+<a href="/superadmin" class="btn btn-dark w-100">Back to Super Admin</a>
+<p class="small mt-3 text-muted">Tip: Keep <code>moaum_stc.db</code> safe - it contains ALL students, results, PINs. Copy to flash drive for backup.</p>
+</div></div>
+""")
+
+@app.route('/download_excel')
+def download_excel():
+    try: return send_file("moaum_stc_results_export.xlsx", as_attachment=True)
+    except: return "<h3>No export yet. Enter results first Sir! <a href='/superadmin'>Back</a></h3>"
+
+@app.route('/teacher', methods=['GET','POST'])
+@app.route('/admin', methods=['GET','POST'])
+@app.route('/enter_result', methods=['GET','POST'])
+def enter_result():
+    if session.get('role') not in ['teacher','admin','superadmin']: return redirect('/login')
+    db=get_db(); classes=db.execute("SELECT * FROM classes").fetchall(); subjects=db.execute("SELECT * FROM subjects").fetchall()
+    teachers_comments=db.execute("SELECT * FROM comments_template WHERE category='teacher'").fetchall()
+    principal_comments=db.execute("SELECT * FROM comments_template WHERE category='principal'").fetchall()
+    trade_comments=db.execute("SELECT * FROM comments_template WHERE category='trade'").fetchall()
+    if request.method=='POST' and 'student_id' in request.form:
+        sid=int(request.form['student_id']); sub=request.form['subject']
+        ca1=int(request.form['ca1'] or 0); ca2=int(request.form['ca2'] or 0); ca3=int(request.form['ca3'] or 0); exam=int(request.form['exam'] or 0)
+        total=ca1+ca2+ca3+exam; grade,_=grade_calc(total)
+        term=request.form['term']; sess=request.form['session']; class_name=request.form['class_name']
+        att_p=int(request.form['att_present'] or 0); att_t=int(request.form['att_total'] or 0)
+        t_com=request.form['teacher_comment']; p_com=request.form['principal_comment']; tr_com=request.form['trade_comment']
+        db.execute("DELETE FROM results WHERE student_id=? AND subject=? AND term=? AND session=?",(sid,sub,term,sess))
+        db.execute("INSERT INTO results (student_id, subject, ca1, ca2, ca3, exam, total, grade, term, session, class_name, attendance_present, attendance_total, teacher_comment, principal_comment, trade_comment) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(sid,sub,ca1,ca2,ca3,exam,total,grade,term,sess,class_name,att_p,att_t,t_com,p_com,tr_com))
+        db.commit(); return redirect('/enter_result')
+    students=db.execute("SELECT * FROM users WHERE role='student' ORDER BY class_name, full_name").fetchall()
+    recent=db.execute("SELECT r.*, u.username, u.full_name FROM results r JOIN users u ON r.student_id=u.id ORDER BY r.id DESC LIMIT 30").fetchall()
+    return render_template_string("""
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+<nav class="navbar navbar-dark bg-dark"><div class="container"><span class="navbar-brand">{{session['role']|upper}} - MOAUM STC - Result Entry CA 10+10+10+70 - EDITABLE</span><div><a href="/superadmin" class="btn btn-sm btn-warning">Super Admin</a> <a href="/logout" class="btn btn-sm btn-light">Logout</a></div></div></nav>
+<div class="container my-3">
+<div class="card p-3"><h6>Enter Result - CA1(10)+CA2(10)+CA3(10)+Exam(70)=100 - Editable</h6>
+<form method="post" class="row g-2">
+<div class="col-md-3"><select name="student_id" class="form-select form-select-sm" required><option value="">Select Student</option>{% for s in students %}<option value="{{s['id']}}">{{s['username']}} - {{s['full_name']}} - {{s['class_name']}}</option>{% endfor %}</select></div>
+<div class="col-md-2"><select name="subject" class="form-select form-select-sm" required><option value="">Subject</option>{% for sub in subjects %}<option>{{sub['name']}}</option>{% endfor %}</select></div>
+<div class="col-md-1"><input name="class_name" class="form-control form-control-sm" placeholder="Class" required></div>
+<div class="col-md-2"><select name="term" class="form-select form-select-sm"><option>1st Term</option><option>2nd Term</option><option>3rd Term</option></select></div>
+<div class="col-md-2"><input name="session" class="form-control form-control-sm" value="2025/2026"></div>
+<div class="col-md-2"><input name="att_present" type="number" class="form-control form-control-sm" placeholder="Present e.g 85"></div>
+<div class="col-md-2"><input name="att_total" type="number" class="form-control form-control-sm" placeholder="Total Days e.g 100"></div>
+<div class="col-md-1"><input name="ca1" type="number" max="10" class="form-control form-control-sm" placeholder="CA1/10" required></div>
+<div class="col-md-1"><input name="ca2" type="number" max="10" class="form-control form-control-sm" placeholder="CA2/10" required></div>
+<div class="col-md-1"><input name="ca3" type="number" max="10" class="form-control form-control-sm" placeholder="CA3/10" required></div>
+<div class="col-md-1"><input name="exam" type="number" max="70" class="form-control form-control-sm" placeholder="Exam/70" required></div>
+<div class="col-md-3"><select name="teacher_comment" class="form-select form-select-sm">{% for c in teachers_comments %}<option>{{c['comment']}}</option>{% endfor %}</select><small>Teacher</small></div>
+<div class="col-md-3"><select name="trade_comment" class="form-select form-select-sm">{% for c in trade_comments %}<option>{{c['comment']}}</option>{% endfor %}</select><small>Trade/Character</small></div>
+<div class="col-md-3"><select name="principal_comment" class="form-select form-select-sm">{% for c in principal_comments %}<option>{{c['comment']}}</option>{% endfor %}</select><small>Principal</small></div>
+<div class="col-md-3"><button class="btn btn-success btn-sm w-100">Save Result (Auto Computes)</button></div>
+</form></div>
+<div class="row mt-3 g-2"><div class="col-md-6"><div class="card p-2"><h6>Broadsheet - Master Sheet - Auto Position</h6><form action="/broadsheet_view" method="post" class="row g-1"><div class="col-3"><select name="class_name" class="form-select form-select-sm">{% for c in classes %}<option>{{c['name']}}</option>{% endfor %}</select></div><div class="col-3"><select name="term" class="form-select form-select-sm"><option>1st Term</option><option>2nd Term</option><option>3rd Term</option></select></div><div class="col-3"><input name="session" class="form-control form-control-sm" value="2025/2026"></div><div class="col-3"><button class="btn btn-dark btn-sm w-100">View Broadsheet</button></div></form></div></div><div class="col-md-6"><div class="card p-2"><h6>Post Assignment - Holiday Assignment</h6><form action="/post_assignment" method="post" class="row g-1"><div class="col-3"><input name="title" class="form-control form-control-sm" placeholder="Title" required></div><div class="col-2"><input name="subject" class="form-control form-control-sm" placeholder="Subject"></div><div class="col-2"><input name="class_name" class="form-control form-control-sm" placeholder="Class"></div><div class="col-3"><input name="content" class="form-control form-control-sm" placeholder="Content"></div><div class="col-2"><button class="btn btn-warning btn-sm w-100">Post</button></div></form></div></div></div>
+<div class="card mt-3 p-2"><h6>Recent Results - EDITABLE (Edit CA, Exam, Comments)</h6><table class="table table-sm small"><tr><th>RegNo</th><th>Name</th><th>Subject</th><th>CA1</th><th>CA2</th><th>CA3</th><th>Exam</th><th>Total</th><th>Grade</th><th>Action</th></tr>{% for r in recent %}<tr><td>{{r['username']}}</td><td>{{r['full_name']}}</td><td>{{r['subject']}}</td><td>{{r['ca1']}}</td><td>{{r['ca2']}}</td><td>{{r['ca3']}}</td><td>{{r['exam']}}</td><td><b>{{r['total']}}</b></td><td>{{r['grade']}}</td><td><a href="/edit_result/{{r['id']}}" class="btn btn-primary btn-sm">Edit</a> <a href="/delete_result/{{r['id']}}" class="btn btn-danger btn-sm">Del</a></td></tr>{% endfor %}</table></div>
+</div>""", students=students, subjects=subjects, classes=classes, teachers_comments=teachers_comments, principal_comments=principal_comments, trade_comments=trade_comments, recent=recent)
+
+@app.route('/edit_result/<int:id>', methods=['GET','POST'])
+def edit_result(id):
+    db=get_db(); r=db.execute("SELECT r.*, u.full_name FROM results r JOIN users u ON r.student_id=u.id WHERE r.id=?",(id,)).fetchone()
+    if not r: return redirect('/enter_result')
+    if request.method=='POST':
+        ca1=int(request.form['ca1']); ca2=int(request.form['ca2']); ca3=int(request.form['ca3']); exam=int(request.form['exam']); total=ca1+ca2+ca3+exam; grade,_=grade_calc(total)
+        db.execute("UPDATE results SET subject=?, ca1=?, ca2=?, ca3=?, exam=?, total=?, grade=?, teacher_comment=?, principal_comment=?, trade_comment=?, attendance_present=?, attendance_total=? WHERE id=?", (request.form['subject'], ca1,ca2,ca3,exam,total,grade,request.form['teacher_comment'],request.form['principal_comment'],request.form['trade_comment'],request.form['att_present'],request.form['att_total'], id)); db.commit(); return redirect('/enter_result')
+    return render_template_string("""<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><div class="container my-4"><a href="/enter_result" class="btn btn-dark btn-sm">Back</a><div class="card p-4 mt-2"><h5>Edit Result - {{r['full_name']}} - {{r['subject']}}</h5><form method="post" class="row g-2"><div class="col-md-4"><input name="subject" value="{{r['subject']}}" class="form-control"></div><div class="col-md-2"><input name="ca1" value="{{r['ca1']}}" type="number" max="10" class="form-control"></div><div class="col-md-2"><input name="ca2" value="{{r['ca2']}}" type="number" max="10" class="form-control"></div><div class="col-md-2"><input name="ca3" value="{{r['ca3']}}" type="number" max="10" class="form-control"></div><div class="col-md-2"><input name="exam" value="{{r['exam']}}" type="number" max="70" class="form-control"></div><div class="col-md-3"><input name="att_present" value="{{r['attendance_present']}}" class="form-control" placeholder="Present"></div><div class="col-md-3"><input name="att_total" value="{{r['attendance_total']}}" class="form-control" placeholder="Total"></div><div class="col-md-6"><input name="teacher_comment" value="{{r['teacher_comment']}}" class="form-control"></div><div class="col-md-6"><input name="trade_comment" value="{{r['trade_comment']}}" class="form-control"></div><div class="col-md-6"><input name="principal_comment" value="{{r['principal_comment']}}" class="form-control"></div><div class="col-md-12"><button class="btn btn-success w-100">Update Result (Auto Re-Calculate)</button></div></form></div></div>""", r=r)
+
+@app.route('/delete_result/<int:id>')
+def delete_result(id): db=get_db(); db.execute("DELETE FROM results WHERE id=?",(id,)); db.commit(); return redirect('/enter_result')
+@app.route('/post_assignment', methods=['POST'])
+def post_assignment(): db=get_db(); db.execute("INSERT INTO assignments (title, subject, class_name, content, posted_by, date_posted) VALUES (?,?,?,?,?,?)",(request.form['title'],request.form['subject'],request.form['class_name'],request.form['content'],session.get('full_name'),datetime.now().strftime("%Y-%m-%d"))); db.commit(); return redirect('/enter_result')
+@app.route('/broadsheet_view', methods=['POST'])
+def broadsheet_view():
+    class_name=request.form['class_name']; term=request.form['term']; sess=request.form['session']
+    db=get_db(); students=db.execute("SELECT * FROM users WHERE role='student' AND class_name=? ORDER BY full_name",(class_name,)).fetchall(); subjects=db.execute("SELECT DISTINCT subject FROM results WHERE class_name=? AND term=? AND session=?",(class_name,term,sess)).fetchall()
+    totals=[];
+    for s in students:
+        tot=db.execute("SELECT SUM(total) as sum FROM results WHERE student_id=? AND term=? AND session=?",(s['id'],term,sess)).fetchone(); totals.append((s['id'], tot['sum'] or 0))
+    totals_sorted=sorted(totals, key=lambda x: x[1], reverse=True); pos_map={sid:i+1 for i,(sid,_) in enumerate(totals_sorted)}
+    return render_template_string("""<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><div class="container-fluid my-3"><a href="/enter_result" class="btn btn-sm btn-dark">Back</a> <button onclick="window.print()" class="btn btn-sm btn-success">Print Broadsheet</button><h5 class="text-center mt-2">MOAUM STC - BROADSHEET - Class {{class_name}} | {{term}} | {{sess}}</h5><div class="table-responsive"><table class="table table-bordered table-sm small"><tr class="table-dark"><th>S/N</th><th>RegNo</th><th>Name</th>{% for sub in subjects %}<th>{{sub['subject']}}</th>{% endfor %}<th>Total</th><th>Avg</th><th>Pos</th></tr>{% for s in students %}{% set tot_row = db.execute("SELECT SUM(total) as sum, AVG(total) as avg FROM results WHERE student_id=? AND term=? AND session=?",(s['id'], term, sess)).fetchone() %}<tr><td>{{loop.index}}</td><td>{{s['username']}}</td><td>{{s['full_name']}}</td>{% for sub in subjects %}{% set r = db.execute("SELECT total FROM results WHERE student_id=? AND subject=? AND term=? AND session=?",(s['id'], sub['subject'], term, sess)).fetchone() %}<td>{{r['total'] if r else '-'}}</td>{% endfor %}<td><b>{{tot_row['sum'] or 0}}</b></td><td>{{"%.1f"|format(tot_row['avg'] or 0)}}</td><td><b>{{pos_map[s['id']]}}</b></td></tr>{% endfor %}</table></div></div>""", class_name=class_name, term=term, sess=sess, students=students, subjects=subjects, db=db, pos_map=pos_map)
+
+@app.route('/student')
+def student_dash():
+    if session.get('role') not in ['student','superadmin','admin']: return redirect('/login')
+    db=get_db(); assignments=db.execute("SELECT * FROM assignments WHERE class_name=? OR class_name='All' ORDER BY id DESC LIMIT 10",(session.get('class_name'),)).fetchall()
+    return render_template_string("""<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><nav class="navbar navbar-dark bg-success"><div class="container"><span class="navbar-brand">Student: {{session['full_name']}} - {{session['class_name']}} - MOAUM STC</span><a href="/logout" class="btn btn-light btn-sm">Logout</a></div></nav><div class="container my-4"><div class="row g-3"><div class="col-md-6"><div class="card p-3 border-success border-2"><h5>Check Result (Requires Scratch PIN)</h5><form action="/student/check_result" method="post"><select name="term" class="form-select mb-2"><option>1st Term</option><option>2nd Term</option><option>3rd Term</option></select><input name="session" class="form-control mb-2" value="2025/2026"><input name="pin" class="form-control mb-2" placeholder="Enter Scratch PIN" required><button class="btn btn-success w-100">Check My Result with PIN</button></form></div></div><div class="col-md-6"><div class="card p-3"><h5>Cumulative Result</h5><form action="/student/cumulative" method="post"><input name="session" class="form-control mb-2" value="2025/2026"><input name="pin" class="form-control mb-2" placeholder="Enter Valid PIN" required><button class="btn btn-primary w-100">View Cumulative</button></form></div><div class="card p-2 mt-2"><h6>Assignments</h6>{% for a in assignments %}<div class="border-bottom py-1 small"><b>{{a['subject']}}: {{a['title']}}</b><br>{{a['content']}} - by {{a['posted_by']}}</div>{% else %}<small>No assignment</small>{% endfor %}</div></div></div></div>""", assignments=assignments)
+
+@app.route('/student/check_result', methods=['POST'])
+def student_check():
+    db=get_db(); uid=session.get('user_id'); term=request.form['term']; sess=request.form['session']; pin_input=request.form['pin'].strip()
+    is_super = (session.get('role')=='superadmin')
+    if not is_super:
+        pin_row=db.execute("SELECT * FROM scratch_pins WHERE pin=? AND term=? AND session=? AND is_used=0",(pin_input, term, sess)).fetchone()
+        if not pin_row:
+            pin_used=db.execute("SELECT * FROM scratch_pins WHERE pin=? AND term=? AND session=? AND used_by=?",(pin_input, term, sess, uid)).fetchone()
+            if not pin_used: return f"<h3 style='color:red;'>Invalid or Used PIN for {term} {sess}! Contact Super Admin.</h3><a href='/student'>Back</a>"
+        else: db.execute("UPDATE scratch_pins SET is_used=1, used_by=? WHERE pin=?",(uid, pin_input)); db.commit()
+    results=db.execute("SELECT * FROM results WHERE student_id=? AND term=? AND session=?",(uid, term, sess)).fetchall()
+    if not results: return f"<h3>No result for {term} {sess}. <a href='/student'>Back</a></h3>"
+    user=db.execute("SELECT * FROM users WHERE id=?",(uid,)).fetchone(); total=sum([r['total'] for r in results]); avg=total/len(results) if results else 0; first=db.execute("SELECT * FROM results WHERE student_id=? AND term=? AND session=? LIMIT 1",(uid, term, sess)).fetchone()
+    classmates=db.execute("SELECT id FROM users WHERE class_name=? AND role='student'",(user['class_name'],)).fetchall(); all_totals=[];
+    for cm in classmates:
+        t=db.execute("SELECT SUM(total) as s FROM results WHERE student_id=? AND term=? AND session=?",(cm['id'], term, sess)).fetchone(); all_totals.append(t['s'] or 0)
+    all_totals_sorted=sorted(all_totals, reverse=True); position=all_totals_sorted.index(total)+1 if total in all_totals_sorted else "-"
+    return render_template_string("""<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><div class="container my-3"><a href="/student" class="btn btn-sm btn-dark">Back</a> <button onclick="window.print()" class="btn btn-sm btn-success">Print Result Sheet</button><div class="card mt-3 p-4"><div class="text-center"><h3 class="fw-bold">MOAUM STC</h3><p><b>OFFICIAL REPORT SHEET - CA 10+10+10+70</b></p></div><hr><div class="row small"><div class="col-6"><b>Name:</b> {{user['full_name']}}<br><b>RegNo:</b> {{user['username']}}<br><b>Class:</b> {{user['class_name']}}<br><b>Position:</b> {{position}} / {{classmates|length}}</div><div class="col-6 text-end"><b>Term:</b> {{term}}<br><b>Session:</b> {{sess}}<br><b>Attendance:</b> {{first['attendance_present']}}/{{first['attendance_total']}}</div></div><table class="table table-bordered table-sm mt-3 small"><tr class="table-dark"><th>#</th><th>Subject</th><th>CA1(10)</th><th>CA2(10)</th><th>CA3(10)</th><th>Exam(70)</th><th>Total</th><th>Grade</th></tr>{% for r in results %}<tr><td>{{loop.index}}</td><td>{{r['subject']}}</td><td>{{r['ca1']}}</td><td>{{r['ca2']}}</td><td>{{r['ca3']}}</td><td>{{r['exam']}}</td><td><b>{{r['total']}}</b></td><td>{{r['grade']}}</td></tr>{% endfor %}</table><p><b>Total:</b> {{total}} | <b>Average:</b> {{"%.1f"|format(avg)}}%</p><p><b>Teacher:</b> {{first['teacher_comment']}}<br><b>Trade:</b> {{first['trade_comment']}}<br><b>Principal:</b> {{first['principal_comment']}}</p></div></div>""", user=user, results=results, total=total, avg=avg, term=term, sess=sess, first=first, position=position, classmates=classmates)
+
+@app.route('/student/cumulative', methods=['POST'])
+def student_cumulative():
+    db=get_db(); uid=session['user_id']; sess=request.form['session']; pin_input=request.form['pin']
+    if session.get('role')!='superadmin':
+        pin_row=db.execute("SELECT * FROM scratch_pins WHERE pin=? AND session=?",(pin_input, sess)).fetchone()
+        if not pin_row: return f"<h3>Invalid PIN</h3><a href='/student'>Back</a>"
+    user=db.execute("SELECT * FROM users WHERE id=?",(uid,)).fetchone()
+    return render_template_string("""<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet"><div class="container my-3"><a href="/student" class="btn btn-sm btn-dark">Back</a> <button onclick="window.print()" class="btn btn-sm btn-primary">Print Cumulative</button><h5 class="text-center mt-2">MOAUM STC - CUMULATIVE - {{user['full_name']}} - {{sess}}</h5><table class="table table-bordered table-sm small"><tr class="table-dark"><th>Subject</th><th>1st Term</th><th>2nd Term</th><th>3rd Term</th><th>Avg</th><th>Grade</th></tr>{% set subjects = db.execute("SELECT DISTINCT subject FROM results WHERE student_id=? AND session=?",(uid, sess)).fetchall() %}{% for sub in subjects %}{% set t1 = db.execute("SELECT total FROM results WHERE student_id=? AND subject=? AND term='1st Term' AND session=?",(uid, sub['subject'], sess)).fetchone() %}{% set t2 = db.execute("SELECT total FROM results WHERE student_id=? AND subject=? AND term='2nd Term' AND session=?",(uid, sub['subject'], sess)).fetchone() %}{% set t3 = db.execute("SELECT total FROM results WHERE student_id=? AND subject=? AND term='3rd Term' AND session=?",(uid, sub['subject'], sess)).fetchone() %}{% set avg = ((t1['total'] if t1 else 0)+(t2['total'] if t2 else 0)+(t3['total'] if t3 else 0))/3 %}<tr><td>{{sub['subject']}}</td><td>{{t1['total'] if t1 else '-'}}</td><td>{{t2['total'] if t2 else '-'}}</td><td>{{t3['total'] if t3 else '-'}}</td><td><b>{{"%.1f"|format(avg)}}</b></td><td>{{'A1' if avg>=75 else 'B' if avg>=60 else 'C' if avg>=50 else 'F'}}</td></tr>{% endfor %}</table></div>""", user=user, sess=sess, uid=uid, db=db)
+
+@app.route('/logout')
+def logout(): session.clear(); return redirect('/')
+
+if __name__=='__main__':
+    init_db()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
