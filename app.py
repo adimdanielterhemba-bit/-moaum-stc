@@ -27,7 +27,7 @@ tr:nth-child(even){background:#f9f9f9}
 </head>
 <body>
 <div class="card">
-<h1>MOAUM STC - Secondary Technical College</h1>
+<h1>MOAUM STC</h1>
 <p class="sub">Student Results Processing System - Upload Excel File</p>
 <p class="sub"><b>Excel Format:</b> Name | Class | Subject | Score (or any column with scores)</p>
 <form method="post" enctype="multipart/form-data">
