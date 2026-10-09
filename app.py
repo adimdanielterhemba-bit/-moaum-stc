@@ -4,91 +4,104 @@ import os
 
 app = Flask(__name__)
 
-HTML = """
+HTML_PAGE = """
 <!DOCTYPE html>
 <html>
 <head>
 <title>MOAUM STC - School Management</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-body{font-family:Arial; background:#f4f6f9; padding:20px}
-.card{background:white; padding:30px; border-radius:10px; max-width:800px; margin:auto; box-shadow:0 2px 10px #ccc}
-h1{color:#0b3d91; text-align:center}
-.btn{background:#0b3d91; color:white; padding:12px 20px; border:none; border-radius:5px; cursor:pointer}
-input{padding:10px; width:100%; margin:10px 0}
-table{width:100%; border-collapse:collapse; margin-top:20px}
-th,td{border:1px solid #ccc; padding:8px; text-align:left}
+body{font-family:Arial; background:#f4f6f9; padding:20px; margin:0}
+.card{background:white; padding:30px; border-radius:10px; max-width:900px; margin:auto; box-shadow:0 2px 15px rgba(0,0,0,0.1)}
+h1{color:#0b3d91; text-align:center; margin-bottom:5px}
+.sub{text-align:center; color:#555; margin-bottom:20px}
+.btn{background:#0b3d91; color:white; padding:12px 25px; border:none; border-radius:5px; cursor:pointer; font-size:16px}
+.btn:hover{background:#09306f}
+input[type=file]{padding:10px; width:100%; margin:15px 0; border:1px solid #ddd; border-radius:5px}
+table{width:100%; border-collapse:collapse; margin-top:20px; font-size:14px}
+th,td{border:1px solid #ddd; padding:8px; text-align:left}
 th{background:#0b3d91; color:white}
+tr:nth-child(even){background:#f9f9f9}
+.footer{text-align:center; margin-top:30px; color:#888; font-size:12px}
 </style>
 </head>
 <body>
 <div class="card">
-<h1>MOAUM STC School Management</h1>
-<p style="text-align:center">Upload Student Excel File (Name, Class, Subject, Score)</p>
+<h1>MOAUM STC - Secondary Technical College</h1>
+<p class="sub">Student Results Processing System - Upload Excel File</p>
+<p class="sub"><b>Excel Format:</b> Name | Class | Subject | Score (or any column with scores)</p>
 <form method="post" enctype="multipart/form-data">
 <input type="file" name="file" accept=".xlsx,.xls" required>
-<button class="btn" type="submit">Upload & Process</button>
+<div style="text-align:center"><button class="btn" type="submit">Upload & Process Results</button></div>
 </form>
 {% if tables %}
-<h2>Results Preview</h2>
-{{ tables|safe }}
+<hr>
+<h2>Preview (Top 100 Rows)</h2>
+<div style="overflow-x:auto">{{ tables|safe }}</div>
 <br><br>
-<a href="/download"><button class="btn">Download Processed Excel</button></a>
+<div style="text-align:center">
+<a href="/download"><button class="btn">Download Processed Excel File</button></a>
+</div>
 {% endif %}
+<div class="footer">MOAUM STC Management System - Powered by Flask</div>
 </div>
 </body>
 </html>
 """
 
-processed_path = "/tmp/processed_results.xlsx"
-last_html = ""
+OUTPUT_FILE = "/tmp/moaum_processed.xlsx"
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    global last_html
     tables = None
     if request.method == "POST":
-        f = request.files.get("file")
-        if f:
-            df = pd.read_excel(f)
-            # Simple processing - add Grade and Remark
-            def get_grade(score):
-                try:
-                    s = float(score)
-                    if s >= 70: return "A"
-                    elif s >= 60: return "B"
-                    elif s >= 50: return "C"
-                    elif s >= 45: return "D"
-                    elif s >= 40: return "E"
-                    else: return "F"
-                except:
-                    return ""
-            def get_remark(score):
-                try:
-                    s = float(score)
-                    return "Pass" if s >= 40 else "Fail"
-                except:
-                    return ""
-            # try to find score column
-            score_col = None
-            for col in df.columns:
-                if "score" in str(col).lower() or "mark" in str(col).lower():
-                    score_col = col
-                    break
-            if score_col is None and len(df.columns) >= 2:
-                score_col = df.columns[-1]
-            if score_col:
-                df["Grade"] = df[score_col].apply(get_grade)
-                df["Remark"] = df[score_col].apply(get_remark)
-            df.to_excel(processed_path, index=False)
-            tables = df.head(100).to_html(classes="table", index=False)
-            last_html = tables
-    return render_template_string(HTML, tables=tables)
+        file = request.files.get("file")
+        if file and file.filename:
+            try:
+                df = pd.read_excel(file)
+                if df.empty:
+                    tables = "<p style='color:red'>Excel file is empty!</p>"
+                else:
+                    # Find score column
+                    score_col = None
+                    for c in df.columns:
+                        cl = str(c).lower()
+                        if "score" in cl or "mark" in cl or "total" in cl:
+                            score_col = c
+                            break
+                    if score_col is None:
+                        score_col = df.columns[-1]
+                    
+                    def grade(s):
+                        try:
+                            v = float(s)
+                            if v >= 70: return "A"
+                            if v >= 60: return "B"
+                            if v >= 55: return "C"
+                            if v >= 50: return "D"
+                            if v >= 40: return "E"
+                            return "F"
+                        except: return ""
+                    def remark(s):
+                        try:
+                            v = float(s)
+                            return "PASS" if v >= 40 else "FAIL"
+                        except: return ""
+                    
+                    df["GRADE"] = df[score_col].apply(grade)
+                    df["REMARK"] = df[score_col].apply(remark)
+                    df.to_excel(OUTPUT_FILE, index=False)
+                    tables = df.head(100).to_html(index=False)
+            except Exception as e:
+                tables = f"<p style='color:red'>Error: {str(e)}</p>"
+    return render_template_string(HTML_PAGE, tables=tables)
 
 @app.route("/download")
 def download():
-    if os.path.exists(processed_path):
-        return send_file(processed_path, as_attachment=True)
-    return "No file yet"
+    if os.path.exists(OUTPUT_FILE):
+        return send_file(OUTPUT_FILE, as_attachment=True, download_name="MOAUM_Processed_Results.xlsx")
+    return "No file processed yet. Please upload first."
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
